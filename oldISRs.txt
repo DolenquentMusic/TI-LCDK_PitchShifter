@@ -1,0 +1,159 @@
+// Dolengewicz, Okoro
+// EE443 HW1
+
+
+#include "DSP_Config.h" 
+  
+// Data is received as 2 16-bit words (left/right) packed into one
+// 32-bit word.  The union allows the data to be accessed as a single 
+// entity when transferring to and from the serial port, but still be 
+// able to manipulate the left and right channels independently.
+
+#define LEFT  0
+#define RIGHT 1
+
+volatile union {
+	Uint32 UINT;
+	Int16 Channel[2];
+} CodecDataIn, CodecDataOut;
+
+
+/*Global Vars*/
+extern double outGainA;
+extern double outGainB;
+extern double gainSlope;
+extern double decay;
+extern double inputGain;
+extern double outputGain;
+
+extern int ii;
+
+extern short delayStep;
+extern short delayValA;
+extern short delayValB;
+extern int GUI_Out;
+extern short GUI_Out_Input;
+extern int bufferSize;
+extern int audioBufferA[12000];
+extern int audioBufferB[12000];
+
+extern double gainVector[720];
+
+extern short switchState;
+
+/*Locol Vars*/
+
+int delayIdxA = 0;
+int delayIdxB = 0;
+short downCount = 0;
+
+interrupt void Codec_ISR()
+{                    
+
+ 	if(CheckForOverrun())					// overrun error occurred (i.e. halted DSP)
+		return;								// so serial port is reset to recover
+
+   	CodecDataIn.UINT = ReadCodecData(); // get input data samples
+   	CodecDataIn.Channel[LEFT] = CodecDataIn.Channel[LEFT]*inputGain;
+   	CodecDataIn.Channel[RIGHT] = CodecDataIn.Channel[RIGHT]*inputGain;
+
+   	GUI_Out_Input = CodecDataIn.Channel[LEFT];
+
+   	if(switchState % 2 == 0) { //no shift
+   		CodecDataOut.UINT = CodecDataIn.UINT;
+   		downCount = 0;
+
+   	} else{
+
+   		if(switchState & (1 << 1)) {
+   			downCount++;
+   			if(downCount == 1)
+   			{
+   				outGainA = 1;
+   				outGainB = 0;
+   				delayValA = 0;
+   				delayValB = 0;
+   				gainSlope = (-1)*abs(gainSlope);
+   			}
+
+			delayValA = delayValA + delayStep;
+			if(delayValA > 720) delayValA = 0;
+
+			if(downCount > 720) {
+
+				downCount = 721;
+				delayValB = delayValB + delayStep;
+				if(delayValB > 720) delayValB = 0;
+
+				outGainA = outGainA + gainSlope;
+				outGainB = 1 - outGainA;
+				if(outGainA <= 0.0001 || outGainA >= 0.9999) gainSlope = gainSlope*(-1);
+
+
+			}
+
+
+			if(delayStep == 1) delayStep = 0;
+			else delayStep = 1;
+
+
+
+			delayIdxA = ii - delayValA;
+			delayIdxB = ii - delayValB;
+
+			if (delayIdxA < 0)  delayIdxA = delayIdxA + bufferSize;
+			if (delayIdxB < 0)  delayIdxB = delayIdxB + bufferSize;
+
+
+   		}
+   		else {
+   			downCount = 0;
+
+			delayValA = delayValA - delayStep;
+			delayValB = delayValB - delayStep;
+
+			if(delayValA < 0) delayValA = 720;
+			if(delayValB < 0) delayValB = 720;
+
+
+			if(delayStep == 1) delayStep = 0;
+			else delayStep = 1;
+
+			outGainA = outGainA + gainSlope;
+			outGainB = 1 - outGainA;
+
+			if(outGainA <= 0.0001) {
+				outGainA = 0;
+				outGainB = 1;
+				gainSlope = gainSlope*(-1);
+			}else if(outGainA >= .9999) {
+					outGainA = 1;
+					outGainB = 0;
+					gainSlope = gainSlope*(-1);
+			}
+
+			delayIdxA = ii - delayValA;
+			delayIdxB = ii - delayValB;
+
+			if (delayIdxA < 0)  delayIdxA = delayIdxA + bufferSize;
+			if (delayIdxB < 0)  delayIdxB = delayIdxB + bufferSize;
+
+   		}
+
+	  	audioBufferA[ii] = CodecDataIn.Channel[LEFT] + decay*audioBufferA[delayIdxA];
+	  	audioBufferB[ii] = CodecDataIn.Channel[LEFT] + decay*audioBufferB[delayIdxB];
+
+ 		CodecDataOut.Channel[RIGHT] = CodecDataIn.Channel[RIGHT];
+ 		CodecDataOut.Channel[LEFT]  = outGainA*audioBufferA[ii] + outGainB*audioBufferB[ii];
+
+ 		CodecDataOut.Channel[LEFT] = outputGain*CodecDataOut.Channel[LEFT];
+
+ 		ii++;
+
+ 		if(ii > bufferSize)	ii = 0;
+   	}
+
+  	GUI_Out = CodecDataOut.Channel[LEFT];
+  	WriteCodecData(CodecDataOut.UINT);
+}
+
